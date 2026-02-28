@@ -1,0 +1,198 @@
+{
+  "_comment": "Примеры JSON-объектов для WhatsApp Cloud API — интерактивные сообщения",
+
+  "1_button_message_welcome": {
+    "_description": "Приветственное сообщение с одной кнопкой",
+    "messaging_product": "whatsapp",
+    "recipient_type": "individual",
+    "to": "77001234567",
+    "type": "interactive",
+    "interactive": {
+      "type": "button",
+      "header": {
+        "type": "text",
+        "text": "⚖️ Юридическая фирма"
+      },
+      "body": {
+        "text": "👋 Здравствуйте! Это юридическая консультация онлайн.\n\nМы поможем вам разобраться с долгами, имуществом и другими правовыми вопросами.\n\nНажмите кнопку ниже, чтобы начать."
+      },
+      "footer": {
+        "text": "Работаем с 09:00 до 18:00 ПН-ПТ"
+      },
+      "action": {
+        "buttons": [
+          {
+            "type": "reply",
+            "reply": {
+              "id": "start",
+              "title": "🚀 Начать консультацию"
+            }
+          }
+        ]
+      }
+    }
+  },
+
+  "2_button_message_consent": {
+    "_description": "Запрос согласия на обработку персональных данных (GDPR/PDPL)",
+    "messaging_product": "whatsapp",
+    "recipient_type": "individual",
+    "to": "77001234567",
+    "type": "interactive",
+    "interactive": {
+      "type": "button",
+      "body": {
+        "text": "🔒 *Согласие на обработку персональных данных*\n\nДля оказания юридической помощи нам необходимо собрать ваши персональные данные (ФИО, ИИН, контактный номер).\n\nДанные будут использованы исключительно для подготовки юридической консультации."
+      },
+      "action": {
+        "buttons": [
+          {
+            "type": "reply",
+            "reply": {
+              "id": "agree",
+              "title": "✅ Согласен(на)"
+            }
+          },
+          {
+            "type": "reply",
+            "reply": {
+              "id": "decline",
+              "title": "❌ Отказ"
+            }
+          }
+        ]
+      }
+    }
+  },
+
+  "3_button_message_property": {
+    "_description": "Вопрос о наличии имущества",
+    "messaging_product": "whatsapp",
+    "recipient_type": "individual",
+    "to": "77001234567",
+    "type": "interactive",
+    "interactive": {
+      "type": "button",
+      "body": {
+        "text": "🏠 Есть ли у вас недвижимость или транспортное средство?"
+      },
+      "action": {
+        "buttons": [
+          {
+            "type": "reply",
+            "reply": {
+              "id": "has_property",
+              "title": "🏡 Есть недвижимость/авто"
+            }
+          },
+          {
+            "type": "reply",
+            "reply": {
+              "id": "no_property",
+              "title": "🚫 Нет имущества"
+            }
+          }
+        ]
+      }
+    }
+  },
+
+  "4_list_message_services": {
+    "_description": "List Message — выбор типа юридической услуги (до 10 пунктов)",
+    "messaging_product": "whatsapp",
+    "recipient_type": "individual",
+    "to": "77001234567",
+    "type": "interactive",
+    "interactive": {
+      "type": "list",
+      "header": {
+        "type": "text",
+        "text": "⚖️ Выберите тип проблемы"
+      },
+      "body": {
+        "text": "Нажмите кнопку ниже и выберите категорию, наиболее подходящую к вашей ситуации."
+      },
+      "footer": {
+        "text": "Можно выбрать только один вариант"
+      },
+      "action": {
+        "button": "📋 Открыть список",
+        "sections": [
+          {
+            "title": "Долги и банкротство",
+            "rows": [
+              {
+                "id": "bankruptcy",
+                "title": "Банкротство физлица",
+                "description": "Списание долгов через суд или внесудебно"
+              },
+              {
+                "id": "collectors",
+                "title": "Коллекторы и банки",
+                "description": "Незаконные звонки, давление, угрозы"
+              },
+              {
+                "id": "enforcement",
+                "title": "Исполнительное производство",
+                "description": "Арест счетов, имущества, зарплаты"
+              }
+            ]
+          },
+          {
+            "title": "Имущество",
+            "rows": [
+              {
+                "id": "realty",
+                "title": "Недвижимость",
+                "description": "Сделки, споры, права собственности"
+              },
+              {
+                "id": "vehicle",
+                "title": "Транспортное средство",
+                "description": "Арест, залог, изъятие авто"
+              }
+            ]
+          },
+          {
+            "title": "Другое",
+            "rows": [
+              {
+                "id": "other",
+                "title": "Иная проблема",
+                "description": "Опишем ситуацию текстом"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+
+  "5_text_message_example": {
+    "_description": "Простое текстовое сообщение",
+    "messaging_product": "whatsapp",
+    "recipient_type": "individual",
+    "to": "77001234567",
+    "type": "text",
+    "text": {
+      "body": "✅ *Спасибо! Ваша заявка принята.*\n\nНаш юрист свяжется с вами в ближайшее время.\n\n⏱ Время ответа: в рабочие дни с 9:00 до 18:00"
+    }
+  },
+
+  "6_bitrix24_lead_payload": {
+    "_description": "Пример тела запроса к Bitrix24 crm.lead.add",
+    "fields": {
+      "TITLE": "Лид WhatsApp: Иванов Иван Иванович",
+      "NAME": "Иванов Иван Иванович",
+      "PHONE": [
+        {
+          "VALUE": "77001234567",
+          "VALUE_TYPE": "WORK"
+        }
+      ],
+      "COMMENTS": "📋 АНКЕТА КЛИЕНТА WhatsApp\n━━━━━━━━━━━━━━━━━━━━━━━\n👤 ФИО: Иванов Иван Иванович\n🪪 ИИН: 880101300123\n🏠 Имущество: Есть недвижимость/транспортное средство\n💰 Сумма долга: 5000000 тенге\n━━━━━━━━━━━━━━━━━━━━━━━\n📝 Суть проблемы:\nЕсть просроченный кредит в банке на 5 млн тенге. Коллекторы звонят каждый день. Арестован расчётный счёт. Хочу признать себя банкротом.",
+      "SOURCE_ID": "WHATSAPP",
+      "STATUS_ID": "NEW"
+    }
+  }
+}
