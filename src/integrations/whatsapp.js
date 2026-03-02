@@ -10,6 +10,14 @@ const apiClient = axios.create({
 });
 
 /**
+ * Утилита для обрезки строки до заданного лимита
+ */
+function truncate(str, limit) {
+  if (!str) return '';
+  return str.length > limit ? str.substring(0, limit) : str;
+}
+
+/**
  * Базовый метод отправки сообщения через WhatsApp Cloud API
  */
 async function sendRequest(payload) {
@@ -40,47 +48,27 @@ async function sendText(to, text) {
 
 /**
  * Отправить сообщение с интерактивными кнопками (до 3 кнопок)
- *
- * Пример payload:
- * {
- *   "messaging_product": "whatsapp",
- *   "to": "77001234567",
- *   "type": "interactive",
- *   "interactive": {
- *     "type": "button",
- *     "body": { "text": "Вы согласны с условиями?" },
- *     "action": {
- *       "buttons": [
- *         { "type": "reply", "reply": { "id": "agree", "title": "Согласен ✅" } },
- *         { "type": "reply", "reply": { "id": "decline", "title": "Отказ ❌" } }
- *       ]
- *     }
- *   }
- * }
- *
- * @param {string} to
- * @param {string} bodyText - текст сообщения
- * @param {Array<{id: string, title: string}>} buttons - массив кнопок
- * @param {string} [headerText] - заголовок (опционально)
- * @param {string} [footerText] - подвал (опционально)
  */
 async function sendButtons(to, bodyText, buttons, headerText = null, footerText = null) {
   const interactive = {
     type: 'button',
     body: { text: bodyText },
     action: {
-      buttons: buttons.map((btn) => ({
+      buttons: buttons.slice(0, 3).map((btn) => ({
         type: 'reply',
-        reply: { id: btn.id, title: btn.title },
+        reply: {
+          id: btn.id,
+          title: truncate(btn.title, 20),
+        },
       })),
     },
   };
 
   if (headerText) {
-    interactive.header = { type: 'text', text: headerText };
+    interactive.header = { type: 'text', text: truncate(headerText, 60) };
   }
   if (footerText) {
-    interactive.footer = { text: footerText };
+    interactive.footer = { text: truncate(footerText, 60) };
   }
 
   return sendRequest({
@@ -94,51 +82,32 @@ async function sendButtons(to, bodyText, buttons, headerText = null, footerText 
 
 /**
  * Отправить сообщение со списком (List Message) — до 10 пунктов
- *
- * Пример payload:
- * {
- *   "messaging_product": "whatsapp",
- *   "to": "77001234567",
- *   "type": "interactive",
- *   "interactive": {
- *     "type": "list",
- *     "header": { "type": "text", "text": "Выберите услугу" },
- *     "body": { "text": "Нажмите кнопку ниже и выберите нужный пункт" },
- *     "footer": { "text": "Юридическая фирма" },
- *     "action": {
- *       "button": "Открыть список",
- *       "sections": [
- *         {
- *           "title": "Категории",
- *           "rows": [
- *             { "id": "bankruptcy", "title": "Банкротство", "description": "Списание долгов через суд" },
- *             { "id": "realty", "title": "Недвижимость", "description": "Сделки с имуществом" }
- *           ]
- *         }
- *       ]
- *     }
- *   }
- * }
- *
- * @param {string} to
- * @param {string} bodyText
- * @param {string} buttonLabel - текст на кнопке открытия списка
- * @param {Array<{title: string, rows: Array<{id, title, description?}>}>} sections
- * @param {string} [headerText]
- * @param {string} [footerText]
  */
 async function sendList(to, bodyText, buttonLabel, sections, headerText = null, footerText = null) {
+  // Валидация и нормализация секций и строк
+  const normalizedSections = sections.slice(0, 10).map((section) => ({
+    title: truncate(section.title, 24),
+    rows: (section.rows || []).slice(0, 10).map((row) => ({
+      id: row.id,
+      title: truncate(row.title, 24),
+      description: truncate(row.description, 72),
+    })),
+  }));
+
   const interactive = {
     type: 'list',
     body: { text: bodyText },
-    action: { button: buttonLabel, sections },
+    action: {
+      button: truncate(buttonLabel, 20),
+      sections: normalizedSections,
+    },
   };
 
   if (headerText) {
-    interactive.header = { type: 'text', text: headerText };
+    interactive.header = { type: 'text', text: truncate(headerText, 60) };
   }
   if (footerText) {
-    interactive.footer = { text: footerText };
+    interactive.footer = { text: truncate(footerText, 60) };
   }
 
   return sendRequest({
