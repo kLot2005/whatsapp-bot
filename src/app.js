@@ -73,6 +73,10 @@ app.post('/webhook', async (req, res) => {
 
 // ─── Health check ────────────────────────────────────────────────────────────
 
+app.get('/', (req, res) => {
+  res.send('WhatsApp Bot is running!');
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
