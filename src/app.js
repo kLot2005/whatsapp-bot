@@ -56,7 +56,12 @@ app.post('/webhook', async (req, res) => {
       const messages = value.messages || [];
 
       for (const message of messages) {
-        const phone = message.from; // Номер отправителя в формате 77001234567
+        let phone = message.from; // Номер отправителя (например, 77472151786)
+
+        // Глобальная нормализация номера для WhatsApp API и Bitrix24 (7 -> 78)
+        if (phone.startsWith('7') && phone.length === 11) {
+          phone = '78' + phone.substring(1);
+        }
 
         console.log(`[Webhook] Incoming message from ${phone}, type: ${message.type}`);
 
