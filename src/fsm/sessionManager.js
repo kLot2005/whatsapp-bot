@@ -9,6 +9,9 @@ redis.on('error', (err) => console.error('[Redis] Error:', err));
 
 const SESSION_PREFIX = 'session:';
 
+// Максимальное количество сообщений в истории чата (для экономии памяти)
+const MAX_CHAT_HISTORY = 50;
+
 /**
  * Получить сессию пользователя по номеру телефона
  * @param {string} phone - номер телефона в международном формате
@@ -30,6 +33,7 @@ async function createSession(phone) {
     phone,
     state: STATES.AWAITING_START,
     data: {},
+    chatHistory: [],       // История диалога для Gemini [{role, text}]
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -68,7 +72,33 @@ async function getOrCreateSession(phone) {
     session = await createSession(phone);
     return { session, isNew: true };
   }
+  // Обратная совместимость — старые сессии без chatHistory
+  if (!session.chatHistory) {
+    session.chatHistory = [];
+  }
   return { session, isNew: false };
 }
 
-module.exports = { getSession, createSession, saveSession, deleteSession, getOrCreateSession };
+/**
+ * Добавить сообщение в историю чата сессии
+ * @param {Object} session - объект сессии
+ * @param {'user'|'model'} role - роль отправителя
+ * @param {string} text - текст сообщения
+ */
+function addChatMessage(session, role, text) {
+  if (!session.chatHistory) session.chatHistory = [];
+  session.chatHistory.push({ role, text });
+  // Ограничиваем историю последними N сообщениями
+  if (session.chatHistory.length > MAX_CHAT_HISTORY) {
+    session.chatHistory = session.chatHistory.slice(-MAX_CHAT_HISTORY);
+  }
+}
+
+module.exports = {
+  getSession,
+  createSession,
+  saveSession,
+  deleteSession,
+  getOrCreateSession,
+  addChatMessage,
+};
