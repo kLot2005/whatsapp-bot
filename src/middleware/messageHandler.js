@@ -3,12 +3,11 @@ const { saveSession, deleteSession, addChatMessage } = require('../fsm/sessionMa
 const { sendText, sendButtons } = require('../integrations/whatsapp');
 const { createLead } = require('../integrations/bitrix24');
 const { validateIIN, validateDebt, normalizeDebt } = require('../utils/validators');
-const { askGemini } = require('../integrations/gemini');
+const { askGemini, askConsultant, detectConsultationConsent } = require('../integrations/gemini');
 
-// ─── Контекстные подсказки для Gemini по каждому состоянию FSM ─────────────
+// ─── Контекстные подсказки для Gemini (скрипт записи) ────────────────────────
 
 const STATE_CONTEXT = {
-  [STATES.AWAITING_START]: 'Клиент ещё не начал анкету. Тебе нужно чтобы он нажал кнопку "Начать". НЕ говори что запишешь его — ты только помогаешь заполнить анкету.',
   [STATES.AWAITING_CONSENT]: 'Клиент должен дать согласие на обработку персональных данных. Кнопки: "Согласен(на)" или "Отказ". Объясни зачем нужны данные, но НЕ обещай записать на приём.',
   [STATES.AWAITING_NAME]: 'Ожидаем ФИО клиента (Фамилия Имя Отчество). Верни к вводу ФИО. НЕ говори что потом "запишешь" или "зарегистрируешь".',
   [STATES.AWAITING_IIN]: 'Ожидаем ИИН клиента — 12-значный идентификационный номер Казахстана. Верни к вводу ИИН. НЕ обещай запись — просто собираем данные.',
@@ -18,16 +17,7 @@ const STATE_CONTEXT = {
   [STATES.COMPLETED]: 'Анкета заполнена. Заявка передана юристам. Ты можешь подробно отвечать на юридические вопросы. НЕ говори когда именно позвонит юрист — ты этого не знаешь. Скажи только что юрист свяжется в рабочее время.',
 };
 
-// ─── Вспомогательные функции отправки типовых сообщений ─────────────────────
-
-async function sendWelcome(to) {
-  return sendButtons(
-    to,
-    '👋 Здравствуйте! Это юридическая консультация онлайн.\n\nМы поможем вам разобраться с долгами, имуществом и другими правовыми вопросами.\n\nНажмите кнопку ниже, чтобы начать.',
-    [{ id: 'start', title: '🚀 Начать' }],
-    '⚖️ Юридическая фирма'
-  );
-}
+// ─── Вспомогательные функции отправки сообщений ─────────────────────────────
 
 async function sendConsentRequest(to) {
   return sendButtons(
@@ -41,7 +31,7 @@ async function sendConsentRequest(to) {
 }
 
 async function sendNameRequest(to) {
-  return sendText(to, '📝 Пожалуйста, введите ваше *ФИО* полностью (Фами    лия Имя Отчество):');
+  return sendText(to, '📝 Пожалуйста, введите ваше *ФИО* полностью (Фамилия Имя Отчество):');
 }
 
 async function sendIINRequest(to) {
@@ -108,21 +98,15 @@ async function sendDeclineMessage(to) {
   );
 }
 
-// ─── AI-ответ с обработкой ошибок ───────────────────────────────────────────
+// ─── AI-ответ с обработкой ошибок (скрипт записи) ───────────────────────────
 
-/**
- * Получить ответ от Gemini и отправить клиенту
- * Если Gemini недоступен — отправляет fallback-сообщение
- */
 async function sendAIResponse(phone, session, userText, contextHint = '') {
   try {
-    // Добавляем имя клиента в подсказку если оно уже известно
     const nameHint = session.data?.name ? ` Клиента зовут ${session.data.name} — обращайся по имени.` : '';
     const fullContextHint = contextHint + nameHint;
 
     const aiReply = await askGemini(userText, session.chatHistory, fullContextHint);
 
-    // Сохраняем обмен в историю
     addChatMessage(session, 'user', userText);
     addChatMessage(session, 'model', aiReply);
 
@@ -136,17 +120,9 @@ async function sendAIResponse(phone, session, userText, contextHint = '') {
 
 // ─── Основной обработчик сообщений ──────────────────────────────────────────
 
-/**
- * Обработать входящее сообщение от пользователя
- * @param {string} phone - номер телефона отправителя
- * @param {Object} message - объект сообщения из WhatsApp API
- * @param {Object} session - текущая сессия пользователя
- * @param {boolean} isNew - является ли сессия новой
- */
 async function handleMessage(phone, message, session, isNew) {
   const msgType = message.type;
 
-  // Извлекаем текст из сообщения в зависимости от типа
   let text = null;
   let buttonId = null;
 
@@ -162,41 +138,64 @@ async function handleMessage(phone, message, session, isNew) {
     }
   }
 
-  // Новая сессия — сразу отправляем приветствие
+  // ─── Новая сессия — AI-консультант отправляет приветствие ────────────────
   if (isNew || session.state === STATES.NEW) {
-    await sendWelcome(phone);
+    try {
+      const greeting = await askConsultant('Привет', []);
+      addChatMessage(session, 'model', greeting);
+      await saveSession(phone, session);
+      await sendText(phone, greeting);
+    } catch (err) {
+      console.error(`[AI/Consultant] Greeting error for ${phone}:`, err.message);
+      await sendText(phone, '👋 Здравствуйте! Я консультант юридической фирмы. Расскажите, чем я могу вам помочь?');
+    }
     return;
   }
 
-  // ─── FSM: обработка состояний ───────────────────────────────────────────
+  // ─── FSM: обработка состояний ─────────────────────────────────────────────
 
   switch (session.state) {
 
-    // ── Ожидание нажатия "Начать" ──────────────────────────────────────────
-    case STATES.AWAITING_START: {
-      if (buttonId === 'start') {
-        session.state = STATES.AWAITING_CONSENT;
-        await saveSession(phone, session);
-        await sendConsentRequest(phone);
-      } else if (text) {
-        // Клиент пишет — AI отвечает и напоминает нажать кнопку
-        const contextHint = STATE_CONTEXT[STATES.AWAITING_START];
-        const aiSent = await sendAIResponse(phone, session, text, contextHint);
-        await saveSession(phone, session);
+    // ── AI-консультант (начальный этап) ─────────────────────────────────────
+    case STATES.AI_CONSULTANT: {
+      if (!text) {
+        await sendText(phone, '⚠️ Пожалуйста, напишите ваш вопрос текстом.');
+        break;
+      }
 
-        if (!aiSent) {
-          await sendWelcome(phone);
+      try {
+        // Получаем ответ AI-консультанта
+        const aiReply = await askConsultant(text, session.chatHistory);
+
+        // Сохраняем обмен в историю
+        addChatMessage(session, 'user', text);
+        addChatMessage(session, 'model', aiReply);
+
+        // Проверяем: согласился ли клиент на консультацию?
+        const agreed = await detectConsultationConsent(text, session.chatHistory);
+
+        if (agreed) {
+          // Клиент согласился — переключаем на скрипт записи
+          console.log(`[Bot] Client ${phone} agreed to consultation — switching to script`);
+          session.state = STATES.AWAITING_CONSENT;
+          await saveSession(phone, session);
+
+          // Отправляем ответ консультанта, затем форму согласия
+          await sendText(phone, aiReply);
+          await sendConsentRequest(phone);
         } else {
-          // После AI-ответа повторяем кнопку через небольшую паузу
-          await sendWelcome(phone);
+          // Клиент ещё не согласился — продолжаем беседу
+          await saveSession(phone, session);
+          await sendText(phone, aiReply);
         }
-      } else {
-        await sendWelcome(phone);
+      } catch (err) {
+        console.error(`[AI/Consultant] Error for ${phone}:`, err.message);
+        await sendText(phone, '⚠️ Временные технические неполадки. Попробуйте написать снова.');
       }
       break;
     }
 
-    // ── Ожидание согласия GDPR ─────────────────────────────────────────────
+    // ── Ожидание согласия GDPR ──────────────────────────────────────────────
     case STATES.AWAITING_CONSENT: {
       if (buttonId === 'agree') {
         session.state = STATES.AWAITING_NAME;
@@ -206,23 +205,18 @@ async function handleMessage(phone, message, session, isNew) {
         await deleteSession(phone);
         await sendDeclineMessage(phone);
       } else if (text) {
-        // Клиент задаёт вопрос вместо выбора — AI отвечает
         const contextHint = STATE_CONTEXT[STATES.AWAITING_CONSENT];
         const aiSent = await sendAIResponse(phone, session, text, contextHint);
         await saveSession(phone, session);
-
-        if (!aiSent) {
-          await sendConsentRequest(phone);
-        } else {
-          await sendConsentRequest(phone);
-        }
+        if (!aiSent) await sendConsentRequest(phone);
+        else await sendConsentRequest(phone);
       } else {
         await sendConsentRequest(phone);
       }
       break;
     }
 
-    // ── Сбор ФИО ────────────────────────────────────────────────────────────
+    // ── Сбор ФИО ─────────────────────────────────────────────────────────────
     case STATES.AWAITING_NAME: {
       if (msgType !== 'text' || !text) {
         await sendNonTextWarning(phone);
@@ -230,32 +224,25 @@ async function handleMessage(phone, message, session, isNew) {
         break;
       }
 
-      // Проверяем: это похоже на ФИО (минимум 2 слова) или это вопрос?
       const wordCount = text.split(/\s+/).filter(Boolean).length;
       const looksLikeName = wordCount >= 2 && !/[?!]/.test(text) && text.length < 80;
 
       if (looksLikeName) {
-        // Принимаем как ФИО
         session.data.name = text;
         session.state = STATES.AWAITING_IIN;
         await saveSession(phone, session);
         await sendIINRequest(phone);
       } else {
-        // Выглядит как вопрос или нерелевантный текст — передаём AI
         const contextHint = STATE_CONTEXT[STATES.AWAITING_NAME];
         const aiSent = await sendAIResponse(phone, session, text, contextHint);
         await saveSession(phone, session);
-
-        if (!aiSent) {
-          await sendNameRequest(phone);
-        } else {
-          await sendNameRequest(phone);
-        }
+        if (!aiSent) await sendNameRequest(phone);
+        else await sendNameRequest(phone);
       }
       break;
     }
 
-    // ── Сбор и валидация ИИН ────────────────────────────────────────────────
+    // ── Сбор и валидация ИИН ─────────────────────────────────────────────────
     case STATES.AWAITING_IIN: {
       if (msgType !== 'text' || !text) {
         await sendNonTextWarning(phone);
@@ -264,30 +251,23 @@ async function handleMessage(phone, message, session, isNew) {
       }
 
       if (validateIIN(text)) {
-        // Валидный ИИН
         session.data.iin = text.trim();
         session.state = STATES.AWAITING_PROPERTY;
         await saveSession(phone, session);
         await sendPropertyRequest(phone);
       } else if (/^\d+$/.test(text.replace(/\s/g, ''))) {
-        // Цифры, но неверный формат — стандартная ошибка
         await sendIINError(phone);
       } else {
-        // Похоже на вопрос или текст — AI отвечает
         const contextHint = STATE_CONTEXT[STATES.AWAITING_IIN];
         const aiSent = await sendAIResponse(phone, session, text, contextHint);
         await saveSession(phone, session);
-
-        if (!aiSent) {
-          await sendIINRequest(phone);
-        } else {
-          await sendIINRequest(phone);
-        }
+        if (!aiSent) await sendIINRequest(phone);
+        else await sendIINRequest(phone);
       }
       break;
     }
 
-    // ── Выбор наличия имущества ─────────────────────────────────────────────
+    // ── Выбор наличия имущества ──────────────────────────────────────────────
     case STATES.AWAITING_PROPERTY: {
       if (buttonId === 'has_property') {
         session.data.property = 'Есть недвижимость/транспортное средство';
@@ -300,16 +280,11 @@ async function handleMessage(phone, message, session, isNew) {
         await saveSession(phone, session);
         await sendDebtRequest(phone);
       } else if (text) {
-        // Клиент пишет текст вместо кнопки — AI отвечает
         const contextHint = STATE_CONTEXT[STATES.AWAITING_PROPERTY];
         const aiSent = await sendAIResponse(phone, session, text, contextHint);
         await saveSession(phone, session);
-
-        if (!aiSent) {
-          await sendPropertyRequest(phone);
-        } else {
-          await sendPropertyRequest(phone);
-        }
+        if (!aiSent) await sendPropertyRequest(phone);
+        else await sendPropertyRequest(phone);
       } else {
         await sendNonTextWarning(phone);
         await sendPropertyRequest(phone);
@@ -317,7 +292,7 @@ async function handleMessage(phone, message, session, isNew) {
       break;
     }
 
-    // ── Сбор суммы долга ────────────────────────────────────────────────────
+    // ── Сбор суммы долга ─────────────────────────────────────────────────────
     case STATES.AWAITING_DEBT: {
       if (msgType !== 'text' || !text) {
         await sendNonTextWarning(phone);
@@ -331,24 +306,18 @@ async function handleMessage(phone, message, session, isNew) {
         await saveSession(phone, session);
         await sendProblemRequest(phone);
       } else if (/\d/.test(text) && text.length < 20) {
-        // Есть цифры, но не прошли валидацию — стандартная ошибка
         await sendDebtError(phone);
       } else {
-        // Выглядит как вопрос — AI отвечает
         const contextHint = STATE_CONTEXT[STATES.AWAITING_DEBT];
         const aiSent = await sendAIResponse(phone, session, text, contextHint);
         await saveSession(phone, session);
-
-        if (!aiSent) {
-          await sendDebtRequest(phone);
-        } else {
-          await sendDebtRequest(phone);
-        }
+        if (!aiSent) await sendDebtRequest(phone);
+        else await sendDebtRequest(phone);
       }
       break;
     }
 
-    // ── Сбор описания проблемы ──────────────────────────────────────────────
+    // ── Сбор описания проблемы ───────────────────────────────────────────────
     case STATES.AWAITING_PROBLEM: {
       if (msgType !== 'text' || !text) {
         await sendNonTextWarning(phone);
@@ -356,8 +325,6 @@ async function handleMessage(phone, message, session, isNew) {
         break;
       }
 
-      // На этом этапе любой текст принимается — это и есть описание проблемы
-      // НО если текст слишком короткий (< 10 символов) — AI просит уточнить
       if (text.length < 10) {
         const contextHint = 'Клиент прислал слишком короткое описание проблемы. Попроси описать подробнее что происходит: коллекторы, долги, суд и т.д.';
         const aiSent = await sendAIResponse(phone, session, text, contextHint);
@@ -373,15 +340,15 @@ async function handleMessage(phone, message, session, isNew) {
       // Отправка данных в Bitrix24
       try {
         const leadId = await createLead(session.data, phone);
+        console.log(session.data);
         console.log(`[Bot] Lead created in Bitrix24. ID: ${leadId}, Phone: ${phone}`);
       } catch (err) {
         console.error(`[Bot] Bitrix24 lead creation failed for ${phone}:`, err.message);
-        // Не прерываем UX — клиент всё равно получит подтверждение
       }
 
       await sendCompletionMessage(phone);
 
-      // AI сразу комментирует описание проблемы клиента
+      // AI комментирует описание проблемы клиента
       try {
         const firstAIComment = await askGemini(
           text,
@@ -399,14 +366,13 @@ async function handleMessage(phone, message, session, isNew) {
       break;
     }
 
-    // ── Режим AI-консультации после завершения анкеты ──────────────────────
+    // ── Режим AI-консультации после завершения анкеты ───────────────────────
     case STATES.COMPLETED: {
       if (msgType !== 'text' || !text) {
         await sendNonTextWarning(phone);
         break;
       }
 
-      // Полноценная AI-консультация с историей диалога
       const contextHint = STATE_CONTEXT[STATES.COMPLETED];
       const aiSent = await sendAIResponse(phone, session, text, contextHint);
       await saveSession(phone, session);
@@ -423,7 +389,7 @@ async function handleMessage(phone, message, session, isNew) {
     default: {
       console.warn(`[Bot] Unknown state: ${session.state} for ${phone}`);
       await deleteSession(phone);
-      await sendWelcome(phone);
+      await sendText(phone, '👋 Здравствуйте! Я консультант юридической фирмы. Расскажите, чем я могу вам помочь?');
     }
   }
 }

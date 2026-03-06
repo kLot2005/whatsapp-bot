@@ -31,7 +31,7 @@ async function getSession(phone) {
 async function createSession(phone) {
   const session = {
     phone,
-    state: STATES.AWAITING_START,
+    state: STATES.AI_CONSULTANT,
     data: {},
     chatHistory: [],       // История диалога для Gemini [{role, text}]
     createdAt: new Date().toISOString(),

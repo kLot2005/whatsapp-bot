@@ -4,10 +4,58 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-const model = genAI.getGenerativeModel({
+// ─── Модель 1: AI-консультант (убеждает пройти консультацию) ────────────────
+
+const consultantModel = genAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
     generationConfig: {
-        temperature: 0.4,  // Строже и предсказуемее (0 = детерминировано, 1 = творчески)
+        temperature: 0.6,
+        topP: 0.95,
+    },
+    systemInstruction: `Ты — юрист-консультант казахстанской юридической фирмы, общаешься с клиентом через WhatsApp.
+
+ТВОЯ ГЛАВНАЯ ЦЕЛЬ:
+Убедить клиента записаться на БЕСПЛАТНУЮ юридическую консультацию с реальным юристом нашей фирмы.
+
+ТВОЯ РОЛЬ:
+- Ты профессиональный, тёплый и понимающий консультант
+- Ты общаешься на том языке на котором пишет клиент (русский или казахский)
+- Ты слушаешь проблему, проявляешь эмпатию и даёшь понять что ситуация решаема
+- Ты не решаешь проблему сам — ты мотивируешь обратиться к юристу лично
+
+КАК ВЕСТИ РАЗГОВОР:
+1. Поприветствуй клиента тепло и спроси в чём его ситуация (если первое сообщение)
+2. Выслушай проблему — дай короткий, обнадёживающий ответ (2-3 предложения)
+3. Обязательно упомяни что у вас есть БЕСПЛАТНАЯ консультация с юристом
+4. Мягко направляй к тому чтобы клиент согласился на эту консультацию
+5. Не давай подробных юридических советов (это сделает юрист на консультации)
+
+КАЗАХСТАНСКИЙ КОНТЕКСТ:
+- Работаете в Казахстане, знаете местное законодательство
+- Банкротство физлиц, долги, коллекторы, ИИН, ЕНПФ — знакомые темы
+- Юристы фирмы специализируются на этих вопросах
+
+ПРАВИЛА ОТВЕТОВ:
+- Максимум 300 символов на ответ
+- Используй эмодзи умеренно (1-2 на сообщение)
+- Не обещай конкретное время звонка — только "наш юрист свяжется с вами"
+- Никогда не говори что ты AI — ты консультант фирмы
+- Если клиент пишет на казахском — отвечай на казахском
+
+ПРИМЕР ХОРОШЕГО ОТВЕТА НА ПЕРВОЕ СООБЩЕНИЕ:
+"Здравствуйте! 👋 Я консультант юридической фирмы. Расскажите, чем я могу вам помочь?"
+
+КОГДА КЛИЕНТ СОГЛАШАЕТСЯ НА КОНСУЛЬТАЦИЮ:
+- Скажи что сейчас оформит заявку коллеги
+- НЕ пытайся сам записать — это сделает система`,
+});
+
+// ─── Модель 2: Скрипт-бот (ведёт анкету записи) ─────────────────────────────
+
+const scriptModel = genAI.getGenerativeModel({
+    model: 'gemini-2.5-flash',
+    generationConfig: {
+        temperature: 0.4,
         topP: 0.9,
     },
     systemInstruction: `Ты — AI-ассистент юридической фирмы в Казахстане, работающий через WhatsApp.
@@ -33,17 +81,12 @@ const model = genAI.getGenerativeModel({
 ЧТО ГОВОРИТЬ, ЕСЛИ КЛИЕНТ СПРАШИВАЕТ "КОГДА МНЕ ПЕРЕЗВОНЯТ?":
 Отвечай: "После заполнения анкеты ваша заявка поступит к нашим юристам, и они свяжутся с вами в рабочее время (пн-пт, 9:00-18:00). Давайте продолжим заполнение!"
 
-ЧТО ГОВОРИТЬ, ЕСЛИ КЛИЕНТ ХОЧЕТ "ЗАПИСАТЬСЯ":
-Объясни, что запись происходит автоматически после заполнения анкеты — просто нужно ответить на несколько вопросов, и юрист сам свяжется.
-
 ПРАВИЛА ПОВЕДЕНИЯ ВО ВРЕМЯ АНКЕТЫ:
 1. Если клиент задаёт юридический вопрос — дай краткий ответ (2-4 предложения), затем верни к текущему шагу анкеты
 2. Если клиент выражает беспокойство — сначала проявь эмпатию, затем верни к анкете
 3. Если клиент пишет нерелевантное (привет, спасибо, ок) — кратко ответь и верни к анкете
-4. Не давай юридических советов вместо консультации юриста
-5. Не выдумывай законы или судебную практику — говори что уточнит юрист
-6. Максимальная длина ответа: 300 символов в режиме анкеты, 500 символов в режиме консультации
-7. Используй эмодзи умеренно для WhatsApp-формата
+4. Максимальная длина ответа: 300 символов в режиме анкеты, 500 символов в режиме консультации
+5. Используй эмодзи умеренно для WhatsApp-формата
 
 КАЗАХСТАНСКИЙ КОНТЕКСТ:
 - ИИН — индивидуальный идентификационный номер (12 цифр)
@@ -67,8 +110,73 @@ function formatHistory(history = []) {
     }));
 }
 
+// ─── AI-консультант (убеждает пройти консультацию) ───────────────────────────
+
 /**
- * Отправить сообщение в Gemini с историей диалога
+ * Отправить сообщение AI-консультанту (этап до скрипта записи)
+ * @param {string} userMessage - текст от пользователя
+ * @param {Array} history - история предыдущих сообщений
+ * @returns {Promise<string>} - ответ консультанта
+ */
+async function askConsultant(userMessage, history = []) {
+    try {
+        const formattedHistory = formatHistory(history);
+        const chat = consultantModel.startChat({ history: formattedHistory });
+        const result = await chat.sendMessage(userMessage);
+        return result.response.text();
+    } catch (error) {
+        console.error('[Gemini/Consultant] Error:', error.message);
+        throw error;
+    }
+}
+
+/**
+ * Определяет согласился ли клиент на консультацию (русский и казахский)
+ * @param {string} userMessage - последнее сообщение клиента
+ * @param {Array} history - история диалога
+ * @returns {Promise<boolean>}
+ */
+async function detectConsultationConsent(userMessage, history = []) {
+    try {
+        const historyText = history
+            .slice(-6) // последние 6 сообщений для контекста
+            .map((m) => `${m.role === 'user' ? 'Клиент' : 'Консультант'}: ${m.text}`)
+            .join('\n');
+
+        const prompt = `Ты анализируешь диалог между консультантом и клиентом.
+Определи: согласился ли клиент в своём последнем сообщении записаться на консультацию или он готов предоставить данные для записи?
+
+Последние сообщения диалога:
+${historyText}
+Клиент: ${userMessage}
+
+Ответь ТОЛЬКО одним словом: YES или NO
+
+YES — если клиент:
+- Явно соглашается (да, хорошо, ок, ладно, согласен, давайте, запишите, хочу, жазыңыз, иә, келісемін, жақсы, болады, рахмет и т.п.)
+- Просит записать его / назначить встречу
+- Говорит что готов / хочет консультацию
+
+NO — если клиент:
+- Задаёт вопросы, сомневается, отказывается
+- Просто описывает проблему
+- Говорит "нет", "не надо", "подумаю"
+
+Ответ (только YES или NO):`;
+
+        const result = await scriptModel.generateContent(prompt);
+        const answer = result.response.text().trim().toUpperCase();
+        return answer === 'YES';
+    } catch (error) {
+        console.error('[Gemini/ConsentDetect] Error:', error.message);
+        return false; // при ошибке — не переключаемся
+    }
+}
+
+// ─── Скрипт-бот (ведёт анкету) ───────────────────────────────────────────────
+
+/**
+ * Отправить сообщение в Gemini с историей диалога (для скрипта анкеты)
  * @param {string} userMessage - текст от пользователя
  * @param {Array} history - история предыдущих сообщений
  * @param {string} contextHint - подсказка о текущем состоянии FSM (опционально)
@@ -77,19 +185,14 @@ function formatHistory(history = []) {
 async function askGemini(userMessage, history = [], contextHint = '') {
     try {
         const formattedHistory = formatHistory(history);
+        const chat = scriptModel.startChat({ history: formattedHistory });
 
-        const chat = model.startChat({
-            history: formattedHistory,
-        });
-
-        // Если есть подсказка контекста — добавляем в начало сообщения пользователя
         const fullMessage = contextHint
             ? `[КОНТЕКСТ ДЛЯ AI: ${contextHint}]\n\nСообщение клиента: ${userMessage}`
             : userMessage;
 
         const result = await chat.sendMessage(fullMessage);
-        const response = result.response.text();
-        return response;
+        return result.response.text();
     } catch (error) {
         console.error('[Gemini] Error:', error.message);
         throw error;
@@ -103,7 +206,7 @@ async function askGemini(userMessage, history = [], contextHint = '') {
  */
 async function quickAnswer(prompt) {
     try {
-        const result = await model.generateContent(prompt);
+        const result = await scriptModel.generateContent(prompt);
         return result.response.text();
     } catch (error) {
         console.error('[Gemini] QuickAnswer Error:', error.message);
@@ -111,4 +214,4 @@ async function quickAnswer(prompt) {
     }
 }
 
-module.exports = { askGemini, quickAnswer };
+module.exports = { askConsultant, detectConsultationConsent, askGemini, quickAnswer };
