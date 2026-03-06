@@ -7,8 +7,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
     generationConfig: {
-        temperature: 0.4,       // Строже и предсказуемее (0 = детерминировано, 1 = творчески)
-        maxOutputTokens: 400,   // Ограничение длины ответа
+        temperature: 0.4,  // Строже и предсказуемее (0 = детерминировано, 1 = творчески)
         topP: 0.9,
     },
     systemInstruction: `Ты — AI-ассистент юридической фирмы в Казахстане, работающий через WhatsApp.
