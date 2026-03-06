@@ -116,7 +116,11 @@ async function sendDeclineMessage(to) {
  */
 async function sendAIResponse(phone, session, userText, contextHint = '') {
   try {
-    const aiReply = await askGemini(userText, session.chatHistory, contextHint);
+    // Добавляем имя клиента в подсказку если оно уже известно
+    const nameHint = session.data?.name ? ` Клиента зовут ${session.data.name} — обращайся по имени.` : '';
+    const fullContextHint = contextHint + nameHint;
+
+    const aiReply = await askGemini(userText, session.chatHistory, fullContextHint);
 
     // Сохраняем обмен в историю
     addChatMessage(session, 'user', userText);
