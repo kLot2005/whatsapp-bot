@@ -68,7 +68,7 @@ async function createLead(data, phone) {
   try {
     const url = `${config.bitrix24.webhookUrl}/crm.lead.add.json`;
     const response = await axios.post(url, { fields: leadFields });
-
+    console.log(leadFields);
     if (response.data.error) {
       throw new Error(`Bitrix24 API error: ${response.data.error_description}`);
     }
@@ -78,7 +78,6 @@ async function createLead(data, phone) {
     return leadId;
   } catch (error) {
     const errMsg = error.response?.data || error.message;
-    console.log(leadFields);
     console.error('[Bitrix24] Failed to create lead:', errMsg);
     throw error;
   }
