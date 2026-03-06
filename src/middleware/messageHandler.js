@@ -340,7 +340,7 @@ async function handleMessage(phone, message, session, isNew) {
       // Отправка данных в Bitrix24
       try {
         const leadId = await createLead(session.data, phone);
-        console.log(session.data);
+        console.log("data", session.data);
         console.log(`[Bot] Lead created in Bitrix24. ID: ${leadId}, Phone: ${phone}`);
       } catch (err) {
         console.error(`[Bot] Bitrix24 lead creation failed for ${phone}:`, err.message);
