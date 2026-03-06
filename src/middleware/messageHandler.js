@@ -142,7 +142,7 @@ async function handleMessage(phone, message, session, isNew) {
   if (isNew || session.state === STATES.NEW) {
     try {
       const greeting = await askConsultant('Привет', []);
-      addChatMessage(session, 'model', greeting);
+      // НЕ сохраняем в chatHistory — Gemini требует что история начиналась с role 'user'
       await saveSession(phone, session);
       await sendText(phone, greeting);
     } catch (err) {
