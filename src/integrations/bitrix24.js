@@ -78,6 +78,7 @@ async function createLead(data, phone) {
     return leadId;
   } catch (error) {
     const errMsg = error.response?.data || error.message;
+    console.log(leadFields);
     console.error('[Bitrix24] Failed to create lead:', errMsg);
     throw error;
   }
