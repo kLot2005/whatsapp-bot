@@ -64,11 +64,10 @@ async function createLead(data, phone) {
     SOURCE_ID: 'WHATSAPP',
     STATUS_ID: 'NEW',
   };
-
+  console.log(leadFields);
   try {
     const url = `${config.bitrix24.webhookUrl}/crm.lead.add.json`;
     const response = await axios.post(url, { fields: leadFields });
-    console.log(leadFields);
     if (response.data.error) {
       throw new Error(`Bitrix24 API error: ${response.data.error_description}`);
     }
