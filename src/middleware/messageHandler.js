@@ -570,7 +570,7 @@ async function handleMessage(phone, message, session, isNew) {
       // Генерируем краткое описание проблемы через AI
       let problemSummary = '';
       try {
-        problemSummary = await generateProblemSummary(session.chatHistory);
+        problemSummary = await generateProblemSummary(session.chatHistory, session.data);
         session.data.problemSummary = problemSummary;
         await saveSession(phone, session);
       } catch (err) {
