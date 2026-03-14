@@ -59,11 +59,18 @@ async function createLead(data, phone) {
 
   const timelineComment = lines.join('\n');
 
+  // ── Конвертация номера для Bitrix24: 787... → +77... ──────────────────────
+  // Внутри бота номер хранится c префиксом 8 (787...) для Meta API.
+  // В Bitrix24 нужен стандартный международный формат: +77...
+  const bitrixPhone = phone.startsWith('78')
+    ? '+7' + phone.substring(2)   // 787472151786 → +77472151786
+    : '+' + phone;
+
   // ── Поля лида: стандартные + UF_CRM_* (кастомные) ─────────────────────────
   const leadFields = {
     TITLE: `Лид WhatsApp: ${name}`,
     NAME: name,
-    PHONE: [{ VALUE: phone, VALUE_TYPE: 'WORK' }],
+    PHONE: [{ VALUE: bitrixPhone, VALUE_TYPE: 'WORK' }],
     SOURCE_ID: 'WHATSAPP',
     STATUS_ID: 'NEW',
 
