@@ -11,6 +11,7 @@ const express = require('express');
 const config = require('../config');
 const { getOrCreateSession } = require('./fsm/sessionManager');
 const { handleMessage } = require('./middleware/messageHandler');
+const { acquireLock, releaseLock } = require('./utils/redisLock');
 
 const app = express();
 app.use(express.json());
@@ -65,11 +66,22 @@ app.post('/webhook', async (req, res) => {
 
         console.log(`[Webhook] Incoming message from ${phone}, type: ${message.type}`);
 
+        // ── Redis-блокировка: один обработчик на телефон в каждый момент времени
+        // Защищает от race condition при одновременных сообщениях одного пользователя
+        const lockToken = await acquireLock(phone);
+        if (!lockToken) {
+          console.warn(`[Webhook] Could not acquire lock for ${phone} — message skipped`);
+          continue;
+        }
+
         try {
           const { session, isNew } = await getOrCreateSession(phone);
           await handleMessage(phone, message, session, isNew);
         } catch (err) {
           console.error(`[Webhook] Error processing message from ${phone}:`, err.message);
+        } finally {
+          // Всегда снимаем блокировку — даже при ошибке
+          await releaseLock(phone, lockToken);
         }
       }
     }
