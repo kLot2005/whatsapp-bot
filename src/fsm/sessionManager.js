@@ -1,11 +1,12 @@
 const Redis = require('ioredis');
 const config = require('../../config');
+const logger = require('../utils/logger');
 const STATES = require('../fsm/states');
 
 const redis = new Redis(config.redis.url);
 
-redis.on('connect', () => console.log('[Redis] Connected'));
-redis.on('error', (err) => console.error('[Redis] Error:', err));
+redis.on('connect', () => logger.info('[Redis] Connected'));
+redis.on('error', (err) => logger.error('[Redis] Error', { error: err.message }));
 
 const SESSION_PREFIX = 'session:';
 

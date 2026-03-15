@@ -1,5 +1,6 @@
 const axios = require('axios');
 const config = require('../../config');
+const logger = require('../utils/logger');
 
 /**
  * Создать лид в Bitrix24:
@@ -101,7 +102,7 @@ async function createLead(data, phone) {
     }
 
     const leadId = leadRes.data.result;
-    console.log(`[Bitrix24] Lead created. ID: ${leadId}, Phone: ${phone}`);
+    logger.info(`[Bitrix24] Lead created. ID: ${leadId}, Phone: ${phone}`);
 
     // 2. Добавляем полный текст анкеты в таймлайн (лента активности)
     try {
@@ -112,15 +113,15 @@ async function createLead(data, phone) {
           COMMENT: timelineComment,
         },
       });
-      console.log(`[Bitrix24] Timeline comment added for lead ID: ${leadId}`);
+      logger.info(`[Bitrix24] Timeline comment added for lead ID: ${leadId}`);
     } catch (commentErr) {
-      console.warn(`[Bitrix24] Failed to add timeline comment:`, commentErr.response?.data || commentErr.message);
+      logger.warn(`[Bitrix24] Failed to add timeline comment`, { error: commentErr.response?.data || commentErr.message });
     }
 
     return leadId;
   } catch (error) {
     const errMsg = error.response?.data || error.message;
-    console.error('[Bitrix24] Failed to create lead:', errMsg);
+    logger.error(`[Bitrix24] Failed to create lead`, { error: errMsg });
     throw error;
   }
 }

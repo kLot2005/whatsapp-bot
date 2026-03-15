@@ -2,6 +2,8 @@ const STATES = require('../fsm/states');
 const { saveSession, deleteSession, addChatMessage } = require('../fsm/sessionManager');
 const { sendText, sendButtons } = require('../integrations/whatsapp');
 const { createLead } = require('../integrations/bitrix24');
+const logger = require('../utils/logger');
+const { enqueueJob } = require('../utils/retryQueue');
 const {
   validateIIN,
   extractNumber,
@@ -45,6 +47,12 @@ function getText(message) {
 
 async function handleMessage(phone, message, session, isNew) {
   const text = getText(message);
+
+  // ── Проверка типа сообщения (медиа не поддерживается) ─────────────────────
+  if (message.type !== 'text' && message.type !== 'interactive') {
+    await reply(phone, 'К сожалению, я пока не умею обрабатывать голосовые сообщения, фото или документы. Пожалуйста, напишите ваш вопрос текстом ✍️');
+    return;
+  }
 
   // ── Новая сессия — AI приветствует ────────────────────────────────────────
   if (isNew || session.state === STATES.NEW) {
@@ -113,7 +121,7 @@ async function handleMessage(phone, message, session, isNew) {
         }
 
       } catch (err) {
-        console.error(`[AI/Consultant] Error for ${phone}:`, err.message);
+        logger.error(`[AI/Consultant] Error for ${phone}: ${err.message}`);
         await reply(phone, '⚠️ Временные технические неполадки. Попробуйте написать снова.');
       }
       break;
@@ -574,16 +582,17 @@ async function handleMessage(phone, message, session, isNew) {
         session.data.problemSummary = problemSummary;
         await saveSession(phone, session);
       } catch (err) {
-        console.error(`[AI/Summary] Error for ${phone}:`, err.message);
+        logger.error(`[AI/Summary] Error for ${phone}: ${err.message}`);
       }
 
       // Отправляем лид в Bitrix24
       try {
         const leadId = await createLead(session.data, phone);
-        console.log(`[Bot] Lead created in Bitrix24. ID: ${leadId}, Phone: ${phone}`);
-        console.log('data', session.data);
+        logger.info(`[Bot] Lead created in Bitrix24. ID: ${leadId}, Phone: ${phone}`);
       } catch (err) {
-        console.error(`[Bot] Bitrix24 lead creation failed for ${phone}:`, err.message);
+        logger.error(`[Bot] Bitrix24 lead creation failed for ${phone}: ${err.message}`);
+        // Не теряем лид — ставим в очередь для повторных попыток
+        await enqueueJob('createLead', { data: session.data, phone });
       }
 
       break;
@@ -598,7 +607,7 @@ async function handleMessage(phone, message, session, isNew) {
     }
 
     default: {
-      console.warn(`[Bot] Unknown state: ${session.state} for ${phone}`);
+      logger.warn(`[Bot] Unknown state: ${session.state} for ${phone}`);
       await deleteSession(phone);
       await reply(phone,
         'Здравствуйте! 👋 Вы написали в *YCG – Защита прав заёмщиков*.\n' +

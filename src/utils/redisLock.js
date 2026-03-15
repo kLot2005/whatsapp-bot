@@ -1,10 +1,11 @@
 const Redis = require('ioredis');
 const config = require('../../config');
+const logger = require('./logger');
 
 // Используем отдельный Redis-клиент для блокировок (чтобы не мешать сессиям)
 const lockClient = new Redis(config.redis.url);
 
-lockClient.on('error', (err) => console.error('[RedisLock] Error:', err));
+lockClient.on('error', (err) => logger.error('[RedisLock] Error', { error: err.message }));
 
 const LOCK_PREFIX = 'lock:phone:';
 
@@ -50,7 +51,7 @@ async function acquireLock(phone) {
         await sleep(RETRY_INTERVAL_MS);
     }
 
-    console.warn(`[RedisLock] Timeout acquiring lock for ${phone} — skipping message`);
+    logger.warn(`[RedisLock] Timeout acquiring lock for ${phone} — skipping message`);
     return null; // Не удалось получить блокировку за WAIT_TIMEOUT_MS
 }
 

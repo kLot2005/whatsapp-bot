@@ -1,5 +1,6 @@
 const axios = require('axios');
 const config = require('../../config');
+const logger = require('../utils/logger');
 
 const apiClient = axios.create({
   baseURL: config.whatsapp.apiUrl,
@@ -26,7 +27,7 @@ async function sendRequest(payload) {
     return response.data;
   } catch (error) {
     const errData = error.response?.data || error.message;
-    console.error('[WhatsApp API] Error:', JSON.stringify(errData, null, 2));
+    logger.error('[WhatsApp API] Error', { error: errData });
     throw error;
   }
 }

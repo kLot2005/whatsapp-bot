@@ -12,6 +12,8 @@ const config = require('../config');
 const { getOrCreateSession } = require('./fsm/sessionManager');
 const { handleMessage } = require('./middleware/messageHandler');
 const { acquireLock, releaseLock } = require('./utils/redisLock');
+const logger = require('./utils/logger');
+const { processQueue } = require('./utils/retryQueue');
 
 const app = express();
 app.use(express.json());
@@ -24,11 +26,11 @@ app.get('/webhook', (req, res) => {
   const challenge = req.query['hub.challenge'];
 
   if (mode === 'subscribe' && token === config.whatsapp.verifyToken) {
-    console.log('[Webhook] Verification successful');
+    logger.info('[Webhook] Verification successful');
     return res.status(200).send(challenge);
   }
 
-  console.warn('[Webhook] Verification failed — token mismatch');
+  logger.warn('[Webhook] Verification failed — token mismatch');
   return res.sendStatus(403);
 });
 
@@ -64,13 +66,13 @@ app.post('/webhook', async (req, res) => {
           phone = '78' + phone.substring(1);
         }
 
-        console.log(`[Webhook] Incoming message from ${phone}, type: ${message.type}`);
+        logger.info(`[Webhook] Incoming message from ${phone}, type: ${message.type}`);
 
         // ── Redis-блокировка: один обработчик на телефон в каждый момент времени
         // Защищает от race condition при одновременных сообщениях одного пользователя
         const lockToken = await acquireLock(phone);
         if (!lockToken) {
-          console.warn(`[Webhook] Could not acquire lock for ${phone} — message skipped`);
+          logger.warn(`[Webhook] Could not acquire lock for ${phone} — message skipped`);
           continue;
         }
 
@@ -78,7 +80,7 @@ app.post('/webhook', async (req, res) => {
           const { session, isNew } = await getOrCreateSession(phone);
           await handleMessage(phone, message, session, isNew);
         } catch (err) {
-          console.error(`[Webhook] Error processing message from ${phone}:`, err.message);
+          logger.error(`[Webhook] Error processing message from ${phone}: ${err.message}`);
         } finally {
           // Всегда снимаем блокировку — даже при ошибке
           await releaseLock(phone, lockToken);
@@ -101,8 +103,19 @@ app.get('/health', (req, res) => {
 // ─── Запуск сервера ──────────────────────────────────────────────────────────
 
 app.listen(config.port, () => {
-  console.log(`[Server] WhatsApp Legal Bot running on port ${config.port}`);
-  console.log(`[Server] Webhook URL: http://your-domain.com/webhook`);
+  logger.info(`[Server] WhatsApp Legal Bot running on port ${config.port}`);
+  logger.info(`[Server] Webhook URL: http://your-domain.com/webhook`);
+
+  // ── Фоновый воркер: повторные попытки отправки лидов при сбоях Bitrix24
+  const RETRY_INTERVAL_MS = 30 * 1000; // 30 секунд
+  setInterval(async () => {
+    try {
+      await processQueue();
+    } catch (err) {
+      logger.error('[RetryWorker] Unexpected error', { error: err.message });
+    }
+  }, RETRY_INTERVAL_MS);
+  logger.info(`[RetryWorker] Started, polling every ${RETRY_INTERVAL_MS / 1000}s`);
 });
 
 module.exports = app;
