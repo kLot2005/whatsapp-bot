@@ -43,6 +43,29 @@ function getText(message) {
   return '';
 }
 
+// ─── Ключевые слова для переключения на оператора ────────────────────────────
+// Если клиент пишет что-то из этого списка — бот переключается на ожидание оператора
+const OPERATOR_REQUEST_KEYWORDS = [
+  'оператор',
+  'живой человек',
+  'живого человека',
+  'реального сотрудника',
+  'реальный сотрудник',
+  'менеджер',
+  'позовите',
+  'позвоните мне',
+  'хочу с человеком',
+  'соедините с человеком',
+];
+
+/**
+ * Проверить — просит ли клиент включить реального оператора
+ */
+function isOperatorRequested(text) {
+  const lower = text.toLowerCase();
+  return OPERATOR_REQUEST_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
 // ─── Основной обработчик ─────────────────────────────────────────────────────
 
 async function handleMessage(phone, message, session, isNew) {
@@ -50,7 +73,48 @@ async function handleMessage(phone, message, session, isNew) {
 
   // ── Проверка типа сообщения (медиа не поддерживается) ─────────────────────
   if (message.type !== 'text' && message.type !== 'interactive') {
+    // Если оператор активен — не мешаем, просто молчим
+    if (session.state === STATES.OPERATOR_ACTIVE) return;
     await reply(phone, 'К сожалению, я пока не умею обрабатывать голосовые сообщения, фото или документы. Пожалуйста, напишите ваш вопрос текстом ✍️');
+    return;
+  }
+
+  // ── Оператор активен — бот молчит, но слушает команду возврата ───────────
+  // Оператор ведёт диалог через Meta Business Suite.
+  // Когда он закончит — подсказывает клиенту написать /бот, и бот вернётся.
+  if (session.state === STATES.OPERATOR_ACTIVE) {
+    const BOT_RESUME_COMMANDS = ['/бот', '/bot', '/start', '/старт'];
+    if (text && BOT_RESUME_COMMANDS.includes(text.toLowerCase().trim())) {
+      // Клиент ввёл команду возврата — бот снова включается
+      session.state = STATES.AI_CONSULTANT;
+      session.data.consultantStage = 'empathy';
+      delete session.data._previousState;
+      delete session.data._operatorRequestedAt;
+      delete session.data._operatorTookOverAt;
+      await saveSession(phone, session);
+      logger.info(`[Bot] Client ${phone} resumed bot via command "${text}"`);
+      await reply(phone,
+        '🤖 Бот снова здесь! Готов продолжить.\n\n' +
+        'Если у вас остались вопросы — напишите, я помогу 🙏'
+      );
+    } else {
+      logger.info(`[Bot] Message from ${phone} ignored — operator is active`);
+    }
+    return;
+  }
+
+  // ── Любой этап: клиент просит реального оператора ────────────────────────
+  if (text && isOperatorRequested(text)) {
+    session.data._previousState = session.state;
+    session.state = STATES.OPERATOR_ACTIVE;
+    session.data._operatorRequestedAt = new Date().toISOString();
+    await saveSession(phone, session);
+    logger.info(`[Bot] Client ${phone} requested an operator. Bot paused.`);
+    await reply(phone,
+      '⏳ Понял вас! Сейчас переключаю на живого специалиста.\n\n' +
+      'Оператор ответит вам в рабочее время: *Пн–Пт, 9:00–18:00 (Астана)*\n' +
+      'Пожалуйста, ожидайте 🙏'
+    );
     return;
   }
 
@@ -603,6 +667,16 @@ async function handleMessage(phone, message, session, isNew) {
     // ══════════════════════════════════════════════════════════════════════════
     case STATES.DONE: {
       await reply(phone, 'Ваша заявка уже передана специалистам. Ожидайте, с вами свяжутся в ближайшее время 🙏');
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // OPERATOR_ACTIVE — живой оператор ведёт диалог
+    // (этот case теоретически не достигается, т.к. состояние перехватывается выше,
+    // но оставлен для явности и защиты от edge-cases)
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.OPERATOR_ACTIVE: {
+      logger.info(`[Bot] OPERATOR_ACTIVE case reached for ${phone} — ignoring message`);
       break;
     }
 

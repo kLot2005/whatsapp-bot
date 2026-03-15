@@ -1,10 +1,39 @@
 // ─── ИИН ───────────────────────────────────────────────────────────────────
 
 /**
- * Валидация ИИН (12 цифр)
+ * Валидация ИИН (12 цифр + контрольная сумма)
+ * Алгоритм согласно госстандарту РК
  */
 function validateIIN(value) {
-  return /^\d{12}$/.test(value.trim());
+  const iin = value.trim();
+  if (!/^\d{12}$/.test(iin)) return false;
+  if (iin === '000000000000') return false;
+
+  const digits = iin.split('').map(Number);
+
+  // Веса для первого прохода
+  const weights1 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+  let sum = 0;
+  for (let i = 0; i < 11; i++) {
+    sum += digits[i] * weights1[i];
+  }
+
+  let remainder = sum % 11;
+
+  // Если остаток 10, выполняем второй проход с другими весами
+  if (remainder === 10) {
+    const weights2 = [3, 4, 5, 6, 7, 8, 9, 10, 11, 1, 2];
+    sum = 0;
+    for (let i = 0; i < 11; i++) {
+      sum += digits[i] * weights2[i];
+    }
+    remainder = sum % 11;
+  }
+
+  // Если после второго прохода остаток всё еще 10, ИИН невалиден
+  if (remainder === 10) return false;
+
+  return remainder === digits[11];
 }
 
 // ─── Числа / суммы ───────────────────────────────────────────────────────────

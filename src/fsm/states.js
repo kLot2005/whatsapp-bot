@@ -28,6 +28,9 @@ const STATES = {
   AWAITING_SOCIAL_STATUS: 'AWAITING_SOCIAL_STATUS', // Социальный статус (множественный выбор)
 
   DONE: 'DONE',                                 // Анкета завершена, лид отправлен в Bitrix24
+
+  // ── Оператор ──────────────────────────────────────────────────────────────
+  OPERATOR_ACTIVE: 'OPERATOR_ACTIVE',           // Живой оператор ведёт диалог — бот молчит
 };
 
 module.exports = STATES;
