@@ -1,268 +1,692 @@
 const STATES = require('../fsm/states');
-const { saveSession, deleteSession } = require('../fsm/sessionManager');
+const { saveSession, deleteSession, addChatMessage } = require('../fsm/sessionManager');
 const { sendText, sendButtons } = require('../integrations/whatsapp');
 const { createLead } = require('../integrations/bitrix24');
-const { validateIIN, validateDebt, normalizeDebt } = require('../utils/validators');
+const logger = require('../utils/logger');
+const { enqueueJob } = require('../utils/retryQueue');
+const {
+  validateIIN,
+  extractNumber,
+  isYesAnswer,
+  isNoAnswer,
+  parseCreditTypes,
+  parsePropertyTypes,
+  parseSocialStatus,
+} = require('../utils/validators');
+const {
+  askEmpathy,
+  askDigDeeper,
+  askOfferConsultation,
+  generateProblemSummary,
+  detectConsultationConsent,
+} = require('../integrations/gemini');
 
-// ─── Вспомогательные функции отправки типовых сообщений ─────────────────────
+// ─── Вспомогательные функции ─────────────────────────────────────────────────
 
-async function sendWelcome(to) {
-  return sendButtons(
-    to,
-    '👋 Здравствуйте! Это юридическая консультация онлайн.\n\nМы поможем вам разобраться с долгами, имуществом и другими правовыми вопросами.\n\nНажмите кнопку ниже, чтобы начать.',
-    [{ id: 'start', title: '🚀 Начать' }],
-    '⚖️ Юридическая фирма'
-  );
+async function reply(phone, text) {
+  return sendText(phone, text);
 }
 
-async function sendConsentRequest(to) {
-  return sendButtons(
-    to,
-    '🔒 *Согласие на обработку персональных данных*\n\nДля оказания юридической помощи нам необходимо собрать ваши персональные данные (ФИО, ИИН, контактный номер).\n\nДанные будут использованы исключительно для подготовки юридической консультации и не передаются третьим лицам.',
-    [
-      { id: 'agree', title: '✅ Согласен(на)' },
-      { id: 'decline', title: '❌ Отказ' },
-    ]
-  );
+function isText(message) {
+  return message.type === 'text';
 }
 
-async function sendNameRequest(to) {
-  return sendText(to, '📝 Пожалуйста, введите ваше *ФИО* полностью (Фамилия Имя Отчество):');
+function getText(message) {
+  if (message.type === 'text') return message.text?.body?.trim() || '';
+  if (message.type === 'interactive') {
+    return (
+      message.interactive?.button_reply?.title ||
+      message.interactive?.list_reply?.title ||
+      ''
+    );
+  }
+  return '';
 }
 
-async function sendIINRequest(to) {
-  return sendText(to, '🪪 Введите ваш *ИИН* (12 цифр):');
-}
-
-async function sendIINError(to) {
-  return sendText(
-    to,
-    '❗ИИН введён неверно. ИИН должен состоять ровно из *12 цифр* и не содержать букв или пробелов.\n\nПожалуйста, попробуйте ещё раз:'
-  );
-}
-
-async function sendPropertyRequest(to) {
-  return sendButtons(
-    to,
-    '🏠 Есть ли у вас недвижимость или транспортное средство?',
-    [
-      { id: 'has_property', title: '🏡 Есть имущество' },
-      { id: 'no_property', title: '🚫 Нет имущества' },
-    ]
-  );
-}
-
-async function sendDebtRequest(to) {
-  return sendText(
-    to,
-    '💰 Укажите *общую сумму ваших долгов* в тенге (только цифры, например: 5000000):'
-  );
-}
-
-async function sendDebtError(to) {
-  return sendText(
-    to,
-    '❗Пожалуйста, введите сумму *только цифрами* (например: 3500000):'
-  );
-}
-
-async function sendProblemRequest(to) {
-  return sendText(
-    to,
-    '📋 Опишите вашу ситуацию подробнее:\n\n_Что произошло? Есть ли судебные решения, звонки коллекторов, арест счётов и т.д._'
-  );
-}
-
-async function sendNonTextWarning(to) {
-  return sendText(
-    to,
-    '⚠️ Пожалуйста, ответьте *текстом* или нажмите на предложенную кнопку. Голосовые сообщения, фото и файлы на данном этапе не принимаются.'
-  );
-}
-
-async function sendCompletionMessage(to) {
-  return sendText(
-    to,
-    '✅ *Спасибо! Ваша заявка принята.*\n\nНаш юрист свяжется с вами в ближайшее время для проведения консультации.\n\n⏱ Время ответа: в рабочие дни с 9:00 до 18:00'
-  );
-}
-
-async function sendDeclineMessage(to) {
-  return sendText(
-    to,
-    '🙏 Понимаем ваше решение. Если вы передумаете, просто напишите нам снова.\n\nБез вашего согласия мы не можем продолжить оформление заявки.'
-  );
-}
-
-// ─── Основной обработчик сообщений ──────────────────────────────────────────
+// ─── Ключевые слова для переключения на оператора ────────────────────────────
+// Если клиент пишет что-то из этого списка — бот переключается на ожидание оператора
+const OPERATOR_REQUEST_KEYWORDS = [
+  'оператор',
+  'живой человек',
+  'живого человека',
+  'реального сотрудника',
+  'реальный сотрудник',
+  'менеджер',
+  'позовите',
+  'позвоните мне',
+  'хочу с человеком',
+  'соедините с человеком',
+];
 
 /**
- * Обработать входящее сообщение от пользователя
- * @param {string} phone - номер телефона отправителя
- * @param {Object} message - объект сообщения из WhatsApp API
- * @param {Object} session - текущая сессия пользователя
- * @param {boolean} isNew - является ли сессия новой
+ * Проверить — просит ли клиент включить реального оператора
  */
+function isOperatorRequested(text) {
+  const lower = text.toLowerCase();
+  return OPERATOR_REQUEST_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
+// ─── Основной обработчик ─────────────────────────────────────────────────────
+
 async function handleMessage(phone, message, session, isNew) {
-  const msgType = message.type;
+  const text = getText(message);
 
-  // Извлекаем текст из сообщения в зависимости от типа
-  let text = null;
-  let buttonId = null;
-
-  if (msgType === 'text') {
-    text = message.text?.body?.trim();
-  } else if (msgType === 'interactive') {
-    if (message.interactive?.type === 'button_reply') {
-      buttonId = message.interactive.button_reply?.id;
-      text = message.interactive.button_reply?.title;
-    } else if (message.interactive?.type === 'list_reply') {
-      buttonId = message.interactive.list_reply?.id;
-      text = message.interactive.list_reply?.title;
-    }
-  }
-
-  // Новая сессия — сразу отправляем приветствие
-  if (isNew || session.state === STATES.NEW) {
-    await sendWelcome(phone);
+  // ── Проверка типа сообщения (медиа не поддерживается) ─────────────────────
+  if (message.type !== 'text' && message.type !== 'interactive') {
+    // Если оператор активен — не мешаем, просто молчим
+    if (session.state === STATES.OPERATOR_ACTIVE) return;
+    await reply(phone, 'К сожалению, я пока не умею обрабатывать голосовые сообщения, фото или документы. Пожалуйста, напишите ваш вопрос текстом ✍️');
     return;
   }
 
-  // ─── FSM: обработка состояний ───────────────────────────────────────────
+  // ── Оператор активен — бот молчит, но слушает команду возврата ───────────
+  // Оператор ведёт диалог через Meta Business Suite.
+  // Когда он закончит — подсказывает клиенту написать /бот, и бот вернётся.
+  if (session.state === STATES.OPERATOR_ACTIVE) {
+    const BOT_RESUME_COMMANDS = ['/бот', '/bot', '/start', '/старт'];
+    if (text && BOT_RESUME_COMMANDS.includes(text.toLowerCase().trim())) {
+      // Клиент ввёл команду возврата — бот снова включается
+      session.state = STATES.AI_CONSULTANT;
+      session.data.consultantStage = 'empathy';
+      delete session.data._previousState;
+      delete session.data._operatorRequestedAt;
+      delete session.data._operatorTookOverAt;
+      await saveSession(phone, session);
+      logger.info(`[Bot] Client ${phone} resumed bot via command "${text}"`);
+      await reply(phone,
+        '🤖 Бот снова здесь! Готов продолжить.\n\n' +
+        'Если у вас остались вопросы — напишите, я помогу 🙏'
+      );
+    } else {
+      logger.info(`[Bot] Message from ${phone} ignored — operator is active`);
+    }
+    return;
+  }
+
+  // ── Любой этап: клиент просит реального оператора ────────────────────────
+  if (text && isOperatorRequested(text)) {
+    session.data._previousState = session.state;
+    session.state = STATES.OPERATOR_ACTIVE;
+    session.data._operatorRequestedAt = new Date().toISOString();
+    await saveSession(phone, session);
+    logger.info(`[Bot] Client ${phone} requested an operator. Bot paused.`);
+    await reply(phone,
+      '⏳ Понял вас! Сейчас переключаю на живого специалиста.\n\n' +
+      'Оператор ответит вам в рабочее время: *Пн–Пт, 9:00–18:00 (Астана)*\n' +
+      'Пожалуйста, ожидайте 🙏'
+    );
+    return;
+  }
+
+  // ── Новая сессия — AI приветствует ────────────────────────────────────────
+  if (isNew || session.state === STATES.NEW) {
+    const welcome = [
+      'Здравствуйте! 👋',
+      'Вы написали в юридическую компанию *YCG – Защита прав заёмщиков* ⚖️',
+      '',
+      'Мы помогаем решить финансовые вопросы:',
+      '📌 Восстановление платёжеспособности',
+      '📌 Банкротство физических лиц',
+      '📌 Переговоры с банками и МФО',
+      '',
+      'Расскажите, пожалуйста, с какой проблемой вы столкнулись? Мы постараемся вам помочь 🤝',
+    ].join('\n');
+
+    session.data.consultantStage = 'empathy';
+    await saveSession(phone, session);
+    await reply(phone, welcome);
+    return;
+  }
+
+  // ─── FSM ─────────────────────────────────────────────────────────────────
 
   switch (session.state) {
 
-    // Ожидание нажатия "Начать"
-    case STATES.AWAITING_START: {
-      if (buttonId === 'start') {
-        session.state = STATES.AWAITING_CONSENT;
-        await saveSession(phone, session);
-        await sendConsentRequest(phone);
-      } else {
-        // Пользователь пишет что-то — напоминаем нажать кнопку
-        await sendWelcome(phone);
+    // ══════════════════════════════════════════════════════════════════════════
+    // AI-КОНСУЛЬТАНТ (3 стадии через session.data.consultantStage)
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AI_CONSULTANT: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Пожалуйста, напишите ваш вопрос текстом.');
+        break;
+      }
+
+      const stage = session.data.consultantStage || 'empathy';
+
+      try {
+        let aiReply;
+
+        if (stage === 'empathy') {
+          // Стадия 1: сочувствие + уточняющий вопрос
+          aiReply = await askEmpathy(text, session.chatHistory);
+          addChatMessage(session, 'user', text);
+          addChatMessage(session, 'model', aiReply);
+          session.data.consultantStage = 'dig_deeper';
+          await saveSession(phone, session);
+          await reply(phone, aiReply);
+
+        } else if (stage === 'dig_deeper') {
+          // Стадия 2: углубление в детали
+          aiReply = await askDigDeeper(text, session.chatHistory);
+          addChatMessage(session, 'user', text);
+          addChatMessage(session, 'model', aiReply);
+          session.data.consultantStage = 'offer_consultation';
+          await saveSession(phone, session);
+          await reply(phone, aiReply);
+
+        } else if (stage === 'offer_consultation') {
+          // Стадия 3: убеждение + предложение анкеты
+          aiReply = await askOfferConsultation(text, session.chatHistory);
+          addChatMessage(session, 'user', text);
+          addChatMessage(session, 'model', aiReply);
+          session.state = STATES.QUESTIONNAIRE;
+          await saveSession(phone, session);
+          await reply(phone, aiReply);
+        }
+
+      } catch (err) {
+        logger.error(`[AI/Consultant] Error for ${phone}: ${err.message}`);
+        await reply(phone, '⚠️ Временные технические неполадки. Попробуйте написать снова.');
       }
       break;
     }
 
-    // Ожидание согласия GDPR
-    case STATES.AWAITING_CONSENT: {
-      if (buttonId === 'agree') {
+    // ══════════════════════════════════════════════════════════════════════════
+    // QUESTIONNAIRE — ожидание "Да/Нет" на анкету
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.QUESTIONNAIRE: {
+      const msg = text.toLowerCase().trim();
+
+      if (isYesAnswer(msg)) {
         session.state = STATES.AWAITING_NAME;
         await saveSession(phone, session);
-        await sendNameRequest(phone);
-      } else if (buttonId === 'decline') {
-        await deleteSession(phone);
-        await sendDeclineMessage(phone);
+        await reply(phone,
+          'Отлично! Давайте заполним краткую анкету 📝\n\n' +
+          '🔹 *Введите ваше полное ФИО*\n' +
+          'Формат: Фамилия Имя Отчество\n' +
+          'Пример: *Иванов Иван Иванович*'
+        );
+
+      } else if (isNoAnswer(msg)) {
+        await reply(phone, 'Хорошо, если передумаете — мы всегда готовы помочь! 🙏');
+
       } else {
-        // Нажали не кнопку
-        await sendConsentRequest(phone);
+        // Может клиент всё же соглашается в свободной форме
+        const agreed = await detectConsultationConsent(text, session.chatHistory);
+        if (agreed) {
+          session.state = STATES.AWAITING_NAME;
+          await saveSession(phone, session);
+          await reply(phone,
+            'Отлично! Давайте заполним краткую анкету 📝\n\n' +
+            '🔹 *Введите ваше полное ФИО*\n' +
+            'Формат: Фамилия Имя Отчество\n' +
+            'Пример: *Иванов Иван Иванович*'
+          );
+        } else {
+          await reply(phone, "Пожалуйста, ответьте *Да* или *Нет* 🙏");
+        }
       }
       break;
     }
 
-    // Сбор ФИО
+    // ══════════════════════════════════════════════════════════════════════════
+    // ФИО
+    // ══════════════════════════════════════════════════════════════════════════
     case STATES.AWAITING_NAME: {
-      if (msgType !== 'text' || !text) {
-        await sendNonTextWarning(phone);
-        await sendNameRequest(phone);
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Пожалуйста, введите ФИО текстом.');
         break;
       }
-      session.data.name = text;
+
+      const words = text.split(/\s+/).filter(Boolean);
+      if (words.length < 2) {
+        await reply(phone,
+          '⚠️ Введите *полное ФИО* (минимум Фамилия и Имя):\n' +
+          'Пример: *Иванов Иван Иванович*'
+        );
+        break;
+      }
+
+      const cleanName = words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+      session.data.name = cleanName;
+      session.state = STATES.AWAITING_CITY;
+      await saveSession(phone, session);
+      await reply(phone, `✅ ФИО сохранено!\n📍 *В каком городе вы проживаете?*\nПример: *Астана* или *Алматы*`);
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ГОРОД
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_CITY: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Пожалуйста, напишите название города.');
+        break;
+      }
+
+      const city = text.trim();
+      if (city.length < 2 || city.length > 50 || !/^[\p{L}\s-]+$/u.test(city)) {
+        await reply(phone,
+          '❗ Укажите корректный город\n' +
+          'Примеры: *Алматы*, *Астана*, *Шымкент*'
+        );
+        break;
+      }
+
+      session.data.city = city.charAt(0).toUpperCase() + city.slice(1);
       session.state = STATES.AWAITING_IIN;
       await saveSession(phone, session);
-      await sendIINRequest(phone);
+      await reply(phone,
+        '✅ Город сохранён!\n\n' +
+        '🪪 *Введите ваш ИИН*\n' +
+        'Формат: 12 цифр без пробелов\n' +
+        'Пример: *123456789012*'
+      );
       break;
     }
 
-    // Сбор и валидация ИИН
+    // ══════════════════════════════════════════════════════════════════════════
+    // ИИН
+    // ══════════════════════════════════════════════════════════════════════════
     case STATES.AWAITING_IIN: {
-      if (msgType !== 'text' || !text) {
-        await sendNonTextWarning(phone);
-        await sendIINRequest(phone);
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Введите ИИН текстом.');
         break;
       }
-      if (!validateIIN(text)) {
-        await sendIINError(phone);
+
+      const cleanIIN = text.replace(/\D/g, '');
+      if (!validateIIN(cleanIIN)) {
+        await reply(phone,
+          '❗ Неверный формат ИИН\n\n' +
+          'Требования: ровно *12 цифр*, без пробелов\n' +
+          'Пример: *123456789012*'
+        );
         break;
       }
-      session.data.iin = text.trim();
-      session.state = STATES.AWAITING_PROPERTY;
+
+      session.data.iin = cleanIIN;
+      session.state = STATES.AWAITING_CREDIT_TYPES;
       await saveSession(phone, session);
-      await sendPropertyRequest(phone);
+      await reply(phone,
+        '✅ ИИН принят!\n\n' +
+        '💳 *Выберите типы ваших кредитов:*\n' +
+        '1. Потребительский кредит\n' +
+        '2. Залоговый кредит\n' +
+        '3. Автокредит\n' +
+        '4. Ипотека\n' +
+        '5. Микрозаймы\n' +
+        '6. Долги перед физ.лицами\n' +
+        '7. Алименты\n' +
+        '8. Другое\n\n' +
+        '📌 Можно выбрать несколько через запятую\n' +
+        'Пример: *1, 3, 5*'
+      );
       break;
     }
 
-    // Выбор наличия имущества
-    case STATES.AWAITING_PROPERTY: {
-      if (buttonId === 'has_property') {
-        session.data.property = 'Есть недвижимость/транспортное средство';
-      } else if (buttonId === 'no_property') {
-        session.data.property = 'Имущество отсутствует';
-      } else {
-        await sendNonTextWarning(phone);
-        await sendPropertyRequest(phone);
+    // ══════════════════════════════════════════════════════════════════════════
+    // ТИПЫ КРЕДИТОВ
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_CREDIT_TYPES: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Выберите типы кредитов из списка.');
         break;
       }
+
+      const creditTypes = parseCreditTypes(text);
+      if (!creditTypes) {
+        await reply(phone, '❗ Выберите из списка по номеру\nПример: *1, 3, 5*');
+        break;
+      }
+
+      session.data.creditTypes = creditTypes;
       session.state = STATES.AWAITING_DEBT;
       await saveSession(phone, session);
-      await sendDebtRequest(phone);
+      await reply(phone,
+        '✅ Данные сохранены!\n\n' +
+        '💰 *Укажите общую сумму задолженности* (в тенге)\n' +
+        'Пример: *5 000 000*\n' +
+        'Если не знаете точно — отправьте *-*'
+      );
       break;
     }
 
-    // Сбор суммы долга
+    // ══════════════════════════════════════════════════════════════════════════
+    // ОБЩИЙ ДОЛГ
+    // ══════════════════════════════════════════════════════════════════════════
     case STATES.AWAITING_DEBT: {
-      if (msgType !== 'text' || !text) {
-        await sendNonTextWarning(phone);
-        await sendDebtRequest(phone);
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Введите сумму текстом.');
         break;
       }
-      if (!validateDebt(text)) {
-        await sendDebtError(phone);
-        break;
+
+      if (text.trim() !== '-') {
+        const amount = extractNumber(text);
+        if (amount === null) {
+          await reply(phone, '❗ Не удалось распознать сумму\nПример: *5 000 000*\nИли отправьте *-* если не знаете');
+          break;
+        }
+        session.data.debt = amount;
       }
-      session.data.debt = normalizeDebt(text);
-      session.state = STATES.AWAITING_PROBLEM;
+
+      session.state = STATES.AWAITING_MONTHLY_PAYMENT;
       await saveSession(phone, session);
-      await sendProblemRequest(phone);
+      await reply(phone,
+        '✅ Записано!\n\n' +
+        '📅 *Укажите ваш ежемесячный платёж по кредитам* (в тенге)\n' +
+        'Пример: *120 000*\n' +
+        'Если не знаете — отправьте *-*'
+      );
       break;
     }
 
-    // Сбор описания проблемы
-    case STATES.AWAITING_PROBLEM: {
-      if (msgType !== 'text' || !text) {
-        await sendNonTextWarning(phone);
-        await sendProblemRequest(phone);
+    // ══════════════════════════════════════════════════════════════════════════
+    // ЕЖЕМЕСЯЧНЫЙ ПЛАТЁЖ
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_MONTHLY_PAYMENT: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Введите сумму текстом.');
         break;
       }
-      session.data.problem = text;
-      session.state = STATES.COMPLETED;
+
+      if (text.trim() !== '-') {
+        const amount = extractNumber(text);
+        if (amount === null) {
+          await reply(phone, '❗ Не удалось распознать сумму\nПример: *120 000*\nИли отправьте *-*');
+          break;
+        }
+        session.data.monthlyPayment = amount;
+      }
+
+      session.state = STATES.AWAITING_HAS_OVERDUE;
+      await saveSession(phone, session);
+      await reply(phone, '✅ Данные сохранены!\n\n🔹 *Есть ли у вас просрочки по кредитам?*\nОтветьте *Да* или *Нет*');
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ПРОСРОЧКИ (да/нет)
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_HAS_OVERDUE: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Ответьте Да или Нет.');
+        break;
+      }
+
+      const msg = text.toLowerCase().trim();
+      if (isYesAnswer(msg)) {
+        session.data.hasOverdue = true;
+        session.state = STATES.AWAITING_OVERDUE_DAYS;
+        await saveSession(phone, session);
+        await reply(phone, '🔹 *Укажите приблизительное количество дней просрочки:*');
+
+      } else if (isNoAnswer(msg)) {
+        session.data.hasOverdue = false;
+        session.state = STATES.AWAITING_HAS_INCOME;
+        await saveSession(phone, session);
+        await reply(phone, '🔹 *Есть ли у вас официальный доход?*\nОтветьте *Да* или *Нет*');
+
+      } else {
+        await reply(phone, '❗ Пожалуйста, ответьте *Да* или *Нет*');
+      }
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // КОЛИЧЕСТВО ДНЕЙ ПРОСРОЧКИ
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_OVERDUE_DAYS: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Введите количество дней.');
+        break;
+      }
+
+      session.data.overdueDays = text.trim();
+      session.state = STATES.AWAITING_HAS_INCOME;
+      await saveSession(phone, session);
+      await reply(phone, '✅ Записано!\n\n🔹 *Есть ли у вас официальный доход?*\nОтветьте *Да* или *Нет*');
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ОФИЦИАЛЬНЫЙ ДОХОД
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_HAS_INCOME: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Ответьте Да или Нет.');
+        break;
+      }
+
+      const msg = text.toLowerCase().trim();
+      if (isYesAnswer(msg)) {
+        session.data.hasIncome = true;
+      } else if (isNoAnswer(msg)) {
+        session.data.hasIncome = false;
+      } else {
+        await reply(phone, '❗ Пожалуйста, ответьте *Да* или *Нет*');
+        break;
+      }
+
+      session.state = STATES.AWAITING_HAS_BUSINESS;
+      await saveSession(phone, session);
+      await reply(phone, '🔹 *Имеется ли у вас ТОО или ИП?*\nОтветьте *Да* или *Нет*');
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ТОО/ИП (БИЗНЕС)
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_HAS_BUSINESS: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Ответьте Да или Нет.');
+        break;
+      }
+
+      const msg = text.toLowerCase().trim();
+      if (isYesAnswer(msg)) {
+        session.data.hasBusiness = true;
+      } else if (isNoAnswer(msg)) {
+        session.data.hasBusiness = false;
+      } else {
+        await reply(phone, '❗ Пожалуйста, ответьте *Да* или *Нет*');
+        break;
+      }
+
+      session.state = STATES.AWAITING_HAS_PROPERTY;
+      await saveSession(phone, session);
+      await reply(phone, '🔹 *Имеется ли у вас имущество?*\nОтветьте *Да* или *Нет*');
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // НАЛИЧИЕ ИМУЩЕСТВА
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_HAS_PROPERTY: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Ответьте Да или Нет.');
+        break;
+      }
+
+      const msg = text.toLowerCase().trim();
+      if (isYesAnswer(msg)) {
+        session.data.hasProperty = true;
+        session.state = STATES.AWAITING_PROPERTY_TYPES;
+        await saveSession(phone, session);
+        await reply(phone,
+          '🔹 *Выберите типы вашего имущества:*\n' +
+          '1. Дом\n2. Квартира\n3. Гараж\n4. Доля\n' +
+          '5. Автомобиль\n6. Акции\n7. Другое\n\n' +
+          '📌 Можно несколько через запятую\n' +
+          'Пример: *1, 3, 5*'
+        );
+
+      } else if (isNoAnswer(msg)) {
+        session.data.hasProperty = false;
+        session.state = STATES.AWAITING_HAS_SPOUSE;
+        await saveSession(phone, session);
+        await reply(phone, '🔹 *Есть ли у вас супруг(а)?*\nОтветьте *Да* или *Нет*');
+
+      } else {
+        await reply(phone, '❗ Пожалуйста, ответьте *Да* или *Нет*');
+      }
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ТИПЫ ИМУЩЕСТВА
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_PROPERTY_TYPES: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Выберите типы из списка.');
+        break;
+      }
+
+      const types = parsePropertyTypes(text);
+      if (!types) {
+        await reply(phone, '❗ Выберите из списка по номеру\nПример: *1, 3, 5*');
+        break;
+      }
+
+      session.data.propertyTypes = types;
+      session.state = STATES.AWAITING_HAS_SPOUSE;
+      await saveSession(phone, session);
+      await reply(phone, '✅ Данные сохранены!\n\n🔹 *Есть ли у вас супруг(а)?*\nОтветьте *Да* или *Нет*');
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // СУПРУГ(А)
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_HAS_SPOUSE: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Ответьте Да или Нет.');
+        break;
+      }
+
+      const msg = text.toLowerCase().trim();
+      if (isYesAnswer(msg)) {
+        session.data.hasSpouse = true;
+      } else if (isNoAnswer(msg)) {
+        session.data.hasSpouse = false;
+      } else {
+        await reply(phone, '❗ Пожалуйста, ответьте *Да* или *Нет*');
+        break;
+      }
+
+      session.state = STATES.AWAITING_HAS_CHILDREN;
+      await saveSession(phone, session);
+      await reply(phone, '🔹 *Есть ли у вас несовершеннолетние дети?*\nОтветьте *Да* или *Нет*');
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ДЕТИ
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_HAS_CHILDREN: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Ответьте Да или Нет.');
+        break;
+      }
+
+      const msg = text.toLowerCase().trim();
+      if (isYesAnswer(msg)) {
+        session.data.hasChildren = true;
+      } else if (isNoAnswer(msg)) {
+        session.data.hasChildren = false;
+      } else {
+        await reply(phone, '❗ Пожалуйста, ответьте *Да* или *Нет*');
+        break;
+      }
+
+      session.state = STATES.AWAITING_SOCIAL_STATUS;
+      await saveSession(phone, session);
+      await reply(phone,
+        '🔹 *Выберите ваш социальный статус:*\n' +
+        '1. Лицо с инвалидностью\n' +
+        '2. Получатель АСП\n' +
+        '3. Многодетная семья\n' +
+        '4. Иные пособия/льготы\n' +
+        '5. Не отношусь к льготным категориям\n\n' +
+        '📌 Можно несколько через запятую\n' +
+        'Пример: *2, 3* или просто *5*'
+      );
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // СОЦИАЛЬНЫЙ СТАТУС → ЗАВЕРШЕНИЕ
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.AWAITING_SOCIAL_STATUS: {
+      if (!isText(message) || !text) {
+        await reply(phone, '⚠️ Выберите статус из списка.');
+        break;
+      }
+
+      const statuses = parseSocialStatus(text);
+      if (!statuses) {
+        await reply(phone, '❗ Выберите из списка по номеру\nПример: *1, 2, 3* или *5*');
+        break;
+      }
+
+      session.data.socialStatus = statuses;
+      session.state = STATES.DONE;
       await saveSession(phone, session);
 
-      // Отправка данных в Bitrix24
+      // Отправляем подтверждение
+      await reply(phone,
+        '✅ *Спасибо! Анкета успешно заполнена.*\n\n' +
+        'Наш специалист свяжется с вами в ближайшее рабочее время.\n' +
+        '⏱ Пн–Пт, 9:00–18:00 (Астана)'
+      );
+
+      // Генерируем краткое описание проблемы через AI
+      let problemSummary = '';
+      try {
+        problemSummary = await generateProblemSummary(session.chatHistory, session.data);
+        session.data.problemSummary = problemSummary;
+        await saveSession(phone, session);
+      } catch (err) {
+        logger.error(`[AI/Summary] Error for ${phone}: ${err.message}`);
+      }
+
+      // Отправляем лид в Bitrix24
       try {
         const leadId = await createLead(session.data, phone);
-        console.log(`[Bot] Lead created in Bitrix24. ID: ${leadId}, Phone: ${phone}`);
+        logger.info(`[Bot] Lead created in Bitrix24. ID: ${leadId}, Phone: ${phone}`);
       } catch (err) {
-        console.error(`[Bot] Bitrix24 lead creation failed for ${phone}:`, err.message);
-        // Не прерываем UX — клиент всё равно получит подтверждение
+        logger.error(`[Bot] Bitrix24 lead creation failed for ${phone}: ${err.message}`);
+        // Не теряем лид — ставим в очередь для повторных попыток
+        await enqueueJob('createLead', { data: session.data, phone });
       }
 
-      await sendCompletionMessage(phone);
       break;
     }
 
-    // Сессия завершена — предлагаем начать заново
-    case STATES.COMPLETED: {
-      await deleteSession(phone);
-      await sendWelcome(phone);
+    // ══════════════════════════════════════════════════════════════════════════
+    // DONE — анкета уже заполнена
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.DONE: {
+      await reply(phone, 'Ваша заявка уже передана специалистам. Ожидайте, с вами свяжутся в ближайшее время 🙏');
+      break;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // OPERATOR_ACTIVE — живой оператор ведёт диалог
+    // (этот case теоретически не достигается, т.к. состояние перехватывается выше,
+    // но оставлен для явности и защиты от edge-cases)
+    // ══════════════════════════════════════════════════════════════════════════
+    case STATES.OPERATOR_ACTIVE: {
+      logger.info(`[Bot] OPERATOR_ACTIVE case reached for ${phone} — ignoring message`);
       break;
     }
 
     default: {
-      console.warn(`[Bot] Unknown state: ${session.state} for ${phone}`);
+      logger.warn(`[Bot] Unknown state: ${session.state} for ${phone}`);
       await deleteSession(phone);
-      await sendWelcome(phone);
+      await reply(phone,
+        'Здравствуйте! 👋 Вы написали в *YCG – Защита прав заёмщиков*.\n' +
+        'Расскажите, с какой проблемой вы столкнулись?'
+      );
     }
   }
 }
